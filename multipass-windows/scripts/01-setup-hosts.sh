@@ -7,6 +7,14 @@ set -e
 # /tmp/hostentries maps every node name to its address on the stable lab network,
 # so from here on `dig +short controlplane01` and friends resolve to lab addresses
 # rather than to the Default Switch addresses, which change on host reboot.
+#
+# Every lab name is stripped first, not just this host's, so that re-running the
+# provisioning (see SKIP_LAUNCH in deploy-virtual-machines.sh) replaces the entries
+# instead of appending a second copy of each.
+while read -r _ip name
+do
+    [ -n "$name" ] && sudo sed -i "/[[:space:]]${name}\$/d" /etc/hosts
+done < /tmp/hostentries
 sudo sed -i "/$(hostname)/d" /etc/hosts
 cat /tmp/hostentries | sudo tee -a /etc/hosts &> /dev/null
 

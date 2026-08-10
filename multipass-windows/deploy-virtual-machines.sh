@@ -56,14 +56,39 @@ mp() { "$MULTIPASS" "$@"; }
 # side other than by timing out, and no way out of it other than killing the daemon.
 # See reset-multipass.ps1 for the details.
 reset_daemon() {
-    local vm="$1"
+    local vm="${1:-}"
+    local vmarg=""
+    [ -n "$vm" ] && vmarg=",'-TurnOffVMs','${vm}'"
     echo -e "${YELLOW}  Multipass daemon appears deadlocked. Resetting it...${NC}"
     # Elevation is required to restart the service. If this shell is already elevated
     # no prompt appears; otherwise Windows raises a single UAC prompt.
     powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
-        "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${STAGE_WIN}\\reset-multipass.ps1','-TurnOffVMs','${vm}'" \
+        "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${STAGE_WIN}\\reset-multipass.ps1'${vmarg}" \
         > /dev/null 2>&1 || true
     sleep 8
+}
+
+# Every multipass call goes through this. A stalled daemon makes any command - not
+# just launch - hang forever, and an unguarded `multipass exec` in the middle of
+# provisioning will silently freeze the whole deploy. -k is required because
+# multipass.exe is a Windows process reached over WSL interop and does not reliably
+# die on SIGTERM.
+mp_guard() {
+    local secs="$1" desc="$2"; shift 2
+    local attempt
+    for attempt in 1 2 3; do
+        if timeout -k 10 "$secs" "$MULTIPASS" "$@"; then
+            return 0
+        fi
+        echo -e "${YELLOW}  ${desc} stalled or failed (attempt ${attempt}/3).${NC}"
+        [ "$attempt" -eq 3 ] && return 1
+        reset_daemon
+        # A daemon reset can leave instances stopped; bring the target back up.
+        if [ -n "${GUARD_NODE:-}" ]; then
+            timeout -k 10 300 "$MULTIPASS" start "$GUARD_NODE" > /dev/null 2>&1 || true
+        fi
+    done
+    return 1
 }
 
 # Launch one instance, recovering from a deadlocked daemon and retrying.
@@ -109,14 +134,14 @@ if ! grep -qi microsoft /proc/version 2>/dev/null; then
     exit 1
 fi
 
-DRIVER=$(mp get local.driver 2>/dev/null | tr -d '\r')
+DRIVER=$(timeout -k 10 60 "$MULTIPASS" get local.driver 2>/dev/null | tr -d '\r')
 if [ "$DRIVER" != "hyperv" ]; then
     echo -e "${YELLOW}Multipass driver is '${DRIVER}', not 'hyperv'."
     echo -e "This lab is built and tested against the Hyper-V driver. To switch:"
     echo -e "    multipass set local.driver=hyperv${NC}"
 fi
 
-if ! mp networks --format csv 2>/dev/null | tr -d '\r' | cut -d, -f1 | grep -qx "$SWITCH"; then
+if ! timeout -k 10 60 "$MULTIPASS" networks --format csv 2>/dev/null | tr -d '\r' | cut -d, -f1 | grep -qx "$SWITCH"; then
     echo -e "${RED}Hyper-V switch '${SWITCH}' not found."
     echo -e "Run create-lab-network.ps1 from an elevated PowerShell prompt first:"
     echo -e "    powershell.exe -ExecutionPolicy Bypass -File create-lab-network.ps1${NC}"
@@ -161,10 +186,15 @@ fi
 echo -e "${GREEN}System OK! Host RAM ${MEM_GB}GB, lab network ${LAB_NET}.0/24 on switch '${SWITCH}'.${NC}"
 
 # --------------------------------------------------------- rebuild guard --------
-existing=$(mp list --format csv 2>/dev/null | tr -d '\r' | tail -n +2 | cut -d, -f1)
+existing=$(timeout -k 10 90 "$MULTIPASS" list --format csv 2>/dev/null | tr -d '\r' | tail -n +2 | cut -d, -f1)
+
+# SKIP_LAUNCH=1 re-runs provisioning against instances that already exist, without
+# rebuilding them. Useful on this platform: if the daemon wedges part way through
+# provisioning, you can resume instead of paying for five fresh launches.
 for spec in $specs
 do
     node=$(cut -d ',' -f 1 <<< "$spec")
+    if [ "${SKIP_LAUNCH:-0}" = "1" ]; then break; fi
     if grep -qx "$node" <<< "$existing"; then
         echo -n -e "$RED"
         read -p "VMs are running. Delete and rebuild them (y/n)? " ans
@@ -217,10 +247,15 @@ do
     disk=$(cut -d ',' -f 4 <<< "$spec")
     octet=$(cut -d ',' -f 5 <<< "$spec")
 
+    if [ "${SKIP_LAUNCH:-0}" = "1" ]; then
+        echo -e "${YELLOW}SKIP_LAUNCH set - reusing existing ${node}${NC}"
+        timeout -k 10 300 "$MULTIPASS" start "$node" > /dev/null 2>&1 || true
+        continue
+    fi
+
     if grep -qx "$node" <<< "$existing"; then
         echo -e "${YELLOW}Deleting $node${NC}"
-        mp delete "$node"
-        mp purge
+        mp_guard 180 "delete ${node}" delete --purge "$node" || true
     fi
 
     echo -e "${BLUE}Launching ${node}. CPU: ${cpus}, MEM: ${ram}, IP: ${LAB_NET}.${octet}${NC}"
@@ -242,39 +277,55 @@ do
     ip="${LAB_NET}.${octet}"
 
     echo -e "${BLUE}Configuring ${node} (${ip})${NC}"
+    GUARD_NODE="$node"
 
-    mp transfer "${STAGE_WIN}\\hostentries"           "${node}:/tmp/hostentries"
-    mp transfer "${STAGE_WIN}\\netplan-${node}.yaml"  "${node}:/tmp/99-kthw-lab.yaml"
-    mp transfer "${STAGE_WIN}\\00-setup-network.sh"   "${node}:/tmp/00-setup-network.sh"
-    mp transfer "${STAGE_WIN}\\01-setup-hosts.sh"     "${node}:/tmp/01-setup-hosts.sh"
-    mp transfer "${STAGE_WIN}\\cert_verify.sh"        "${node}:/home/ubuntu/cert_verify.sh"
+    for f in "hostentries:/tmp/hostentries" \
+             "netplan-${node}.yaml:/tmp/99-kthw-lab.yaml" \
+             "00-setup-network.sh:/tmp/00-setup-network.sh" \
+             "01-setup-hosts.sh:/tmp/01-setup-hosts.sh" \
+             "cert_verify.sh:/home/ubuntu/cert_verify.sh"
+    do
+        src="${f%%:*}"; dst="${f#*:}"
+        mp_guard 120 "transfer ${src} to ${node}" \
+            transfer "${STAGE_WIN}\\${src}" "${node}:${dst}" || \
+            { echo -e "${RED}Could not copy ${src} to ${node}.${NC}"; exit 1; }
+    done
 
-    mp exec "$node" -- bash /tmp/00-setup-network.sh
+    mp_guard 180 "network setup on ${node}" exec "$node" -- bash /tmp/00-setup-network.sh || \
+        { echo -e "${RED}Network setup failed on ${node}.${NC}"; exit 1; }
 
     # 00-setup-network.sh applies netplan detached, because doing it in the foreground
     # would tear down the link this exec channel rides on. Poll from out here instead;
     # each attempt is a fresh connection, so a mid-apply blip costs one retry.
     printf "  waiting for %s to come up on %s" "$node" "$ip"
+    up=0
     for attempt in $(seq 1 45); do
-        if mp exec "$node" -- ip -4 -o addr show 2>/dev/null | grep -q "$ip"; then
+        if timeout -k 10 30 "$MULTIPASS" exec "$node" -- ip -4 -o addr show 2>/dev/null \
+             | grep -q "$ip"; then
             printf " ok\n"
+            up=1
             break
-        fi
-        if [ "$attempt" -eq 45 ]; then
-            printf "\n"
-            echo -e "${RED}${node} never came up on ${ip}. Check 'multipass exec ${node} -- ip a'.${NC}"
-            exit 1
         fi
         printf "."
         sleep 2
     done
+    if [ "$up" -ne 1 ]; then
+        printf "\n"
+        echo -e "${RED}${node} never came up on ${ip}. Check 'multipass exec ${node} -- ip a'.${NC}"
+        exit 1
+    fi
 
-    mp exec "$node" -- bash /tmp/01-setup-hosts.sh
-    mp exec "$node" -- chmod +x /home/ubuntu/cert_verify.sh
+    mp_guard 300 "host setup on ${node}" exec "$node" -- bash /tmp/01-setup-hosts.sh || \
+        { echo -e "${RED}Host setup failed on ${node}.${NC}"; exit 1; }
+    mp_guard 60 "chmod cert_verify.sh on ${node}" \
+        exec "$node" -- chmod +x /home/ubuntu/cert_verify.sh || true
 done
+GUARD_NODE=controlplane01
 
-mp transfer "${STAGE_WIN}\\approve-csr.sh" controlplane01:/home/ubuntu/approve-csr.sh
-mp exec controlplane01 -- chmod +x /home/ubuntu/approve-csr.sh
+mp_guard 120 "transfer approve-csr.sh" \
+    transfer "${STAGE_WIN}\\approve-csr.sh" controlplane01:/home/ubuntu/approve-csr.sh || true
+mp_guard 60 "chmod approve-csr.sh" \
+    exec controlplane01 -- chmod +x /home/ubuntu/approve-csr.sh || true
 
 rm -rf "$STAGE"
 
@@ -288,11 +339,12 @@ do
     do
         peer=$(cut -d ',' -f 1 <<< "$peer_spec")
         peer_ip="${LAB_NET}.$(cut -d ',' -f 5 <<< "$peer_spec")"
-        resolved=$(mp exec "$node" -- dig +short "$peer" 2>/dev/null | tr -d '\r' | head -1)
+        resolved=$(timeout -k 10 60 "$MULTIPASS" exec "$node" -- dig +short "$peer" 2>/dev/null \
+                     | tr -d '\r' | head -1)
         if [ "$resolved" != "$peer_ip" ]; then
             echo -e "${RED}  ${node}: '${peer}' resolved to '${resolved}', expected ${peer_ip}${NC}"
             failed=1
-        elif ! mp exec "$node" -- ping -c1 -W2 "$peer_ip" > /dev/null 2>&1; then
+        elif ! timeout -k 10 60 "$MULTIPASS" exec "$node" -- ping -c1 -W2 "$peer_ip" > /dev/null 2>&1; then
             echo -e "${RED}  ${node} cannot reach ${peer} (${peer_ip})${NC}"
             failed=1
         fi
@@ -305,5 +357,5 @@ if [ "$failed" -ne 0 ]; then
 fi
 
 echo -e "${GREEN}All nodes resolve and reach each other on ${LAB_NET}.0/24.${NC}"
-mp list
+timeout -k 10 60 "$MULTIPASS" list || true
 echo -e "${GREEN}Done! Next: multipass shell controlplane01${NC}"

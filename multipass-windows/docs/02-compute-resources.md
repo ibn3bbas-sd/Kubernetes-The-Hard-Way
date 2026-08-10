@@ -54,6 +54,16 @@ The script:
 
 It ends with a table of instances and `Done!`. If the verification step reports a failure, **do not start the labs** - something is wrong with the lab network and the PKI chapters will fail in confusing ways later.
 
+### Resuming a failed deploy
+
+If the deploy dies part way through provisioning, you do not have to rebuild all five VMs. Re-run it against the instances that already exist:
+
+```bash
+SKIP_LAUNCH=1 ./deploy-virtual-machines.sh
+```
+
+That skips the launch phase entirely, starts any instance that is stopped, and re-runs provisioning and verification. Provisioning is idempotent, so it is safe to run as often as you like.
+
 ## 3. Verify
 
 Confirm you can connect to all VMs:
