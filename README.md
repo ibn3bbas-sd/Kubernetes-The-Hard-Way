@@ -49,5 +49,8 @@ We will be building the following:
 ## Getting Started
 
 * If you are using Windows or Intel Mac, start [here](./VirtualBox/docs/01-prerequisites.md) to deploy VirtualBox and Vagrant.
+* If you are using Windows and would rather use Multipass and Hyper-V than VirtualBox, start [here](./multipass-windows/docs/01-prerequisites.md). Requires Windows Pro/Enterprise/Education and WSL.
 * If you are using Apple Silicon Mac (M1/M2/M3), start [here](./apple-silicon/docs/01-prerequisites.md) to deploy Multipass.
+
+All three routes converge on the same [labs](./docs/03-client-tools.md) from step 3 onwards.
 
