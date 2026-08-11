@@ -2,7 +2,8 @@
 # vi:set ft=ruby sw=2 ts=2 sts=2:
 
 # Define how much memory your computer has in GB (e.g. 8, 16)
-# Larger nodes will be created if you have more.
+# Used only to refuse to run on a machine with too little RAM; the VM sizes below
+# are fixed. 8GB is the minimum, 16GB recommended.
 RAM_SIZE = 16
 
 # Define how mnay CPU cores you have.
@@ -13,8 +14,21 @@ CPU_CORES = 8
 # See the documentation before changing this
 IP_NW = "192.168.56."
 
-# Calculate resource amounts
-# based on RAM/CPU
+# Memory per VM, in MB. Fixed values rather than derived from RAM_SIZE, so that what
+# this file allocates, the table in ../VirtualBox/docs/02-compute-resources.md, and
+# the Multipass route in ../multipass-windows all agree. Previously they did not: with
+# RAM_SIZE = 16 this file gave every node 2048MB and the loadbalancer 512MB, while the
+# table claimed 2048/1024/512/1024/1024 - only controlplane01 was correct.
+#
+# 5.5GB total. controlplane01 is the largest because it may run the e2e tests, and
+# both workers are equal at 1024MB - 512MB is thin for containerd, kubelet, kube-proxy
+# and Weave, and an asymmetric pair of workers makes scheduling behaviour harder to
+# reason about. Raise any of these if you have the RAM to spare.
+CONTROL01_RAM = 2048
+CONTROL02_RAM = 1024
+WORKER_RAM    = 1024
+LB_RAM        = 512
+
 ram_selector = (RAM_SIZE / 4) * 4
 if ram_selector < 8
   raise "Unsufficient memory #{RAM_SIZE}GB. min 8GB"
@@ -23,17 +37,17 @@ RESOURCES = {
   "control" => {
     1 => {
       # controlplane01 bigger since it may run e2e tests.
-      "ram" => [ram_selector * 128, 2048].max(),
+      "ram" => CONTROL01_RAM,
       "cpu" => CPU_CORES >= 12 ? 4 : 2,
     },
     2 => {
       # All additional masters get this
-      "ram" => [ram_selector * 128, 2048].min(),
+      "ram" => CONTROL02_RAM,
       "cpu" => CPU_CORES > 8 ? 2 : 1,
     },
   },
   "worker" => {
-    "ram" => [ram_selector * 128, 4096].min(),
+    "ram" => WORKER_RAM,
     "cpu" => (((CPU_CORES / 4) * 4) - 4) / 4,
   },
 }
@@ -115,7 +129,7 @@ Vagrant.configure("2") do |config|
   config.vm.define "loadbalancer" do |node|
     node.vm.provider "virtualbox" do |vb|
       vb.name = "kubernetes-ha-lb"
-      vb.memory = 512
+      vb.memory = LB_RAM
       vb.cpus = 1
     end
     node.vm.hostname = "loadbalancer"

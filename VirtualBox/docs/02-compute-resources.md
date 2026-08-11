@@ -38,11 +38,15 @@ This does the below:
     | ------------  | ---------------------- |:-------------:| -------------:| ----------------:|-----:|
     | controlplane01      | kubernetes-ha-controlplane01 | Master        | 192.168.56.11 |     2711         | 2048 |
     | controlplane02      | kubernetes-ha-controlplane02 | Master        | 192.168.56.12 |     2712         | 1024 |
-    | node01      | kubernetes-ha-node01 | Worker        | 192.168.56.21 |     2721         | 512  |
+    | node01      | kubernetes-ha-node01 | Worker        | 192.168.56.21 |     2721         | 1024 |
     | node02      | kubernetes-ha-node02 | Worker        | 192.168.56.22 |     2722         | 1024 |
-    | loadbalancer  | kubernetes-ha-lb       | LoadBalancer  | 192.168.56.30 |     2730         | 1024 |
+    | loadbalancer  | kubernetes-ha-lb       | LoadBalancer  | 192.168.56.30 |     2730         | 512  |
 
-    > These are the default settings. These can be changed in the Vagrant file
+    > 5.5GB of RAM in total. These are the default settings and can be changed at the top of the
+    > [Vagrantfile](../../vagrant/Vagrantfile) - `CONTROL01_RAM`, `CONTROL02_RAM`, `WORKER_RAM` and
+    > `LB_RAM`. They are fixed values, not derived from `RAM_SIZE`, so this table and what Vagrant
+    > actually allocates cannot drift apart. The same sizes are used by the
+    > [Multipass route](../../multipass-windows/docs/02-compute-resources.md).
 
 - Add's a DNS entry to each of the nodes to access internet
     > DNS: 8.8.8.8
