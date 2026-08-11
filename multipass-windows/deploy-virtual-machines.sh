@@ -225,7 +225,7 @@ do
 done
 
 cp "${SCRIPTS_DIR}/00-setup-network.sh" "${SCRIPTS_DIR}/01-setup-hosts.sh" \
-   "${SCRIPTS_DIR}/kthw-hosts.sh" "${SCRIPTS_DIR}/kthw-hosts.service" \
+   "${SCRIPTS_DIR}/kthw-hosts.sh" \
    "${SCRIPTS_DIR}/cert_verify.sh" "$STAGE/"
 cp "${TOOLS_DIR}/approve-csr.sh" "$STAGE/"
 
@@ -292,7 +292,6 @@ do
              "00-setup-network.sh:/tmp/00-setup-network.sh" \
              "01-setup-hosts.sh:/tmp/01-setup-hosts.sh" \
              "kthw-hosts.sh:/tmp/kthw-hosts.sh" \
-             "kthw-hosts.service:/tmp/kthw-hosts.service" \
              "cert_verify.sh:/home/ubuntu/cert_verify.sh"
     do
         src="${f%%:*}"; dst="${f#*:}"

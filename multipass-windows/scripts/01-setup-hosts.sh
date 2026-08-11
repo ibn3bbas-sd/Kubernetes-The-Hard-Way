@@ -8,14 +8,12 @@ set -e
 # friends resolve to lab addresses rather than to the Default Switch addresses, which
 # change on host reboot.
 #
-# The entries are applied by kthw-hosts.sh rather than inline, because that same
-# script has to run again on every boot - cloud-init regenerates /etc/hosts each time
-# the instance starts and would otherwise wipe the lab out. See kthw-hosts.sh.
+# The entries are applied by kthw-hosts.sh rather than inline, because it also has to
+# stop cloud-init regenerating /etc/hosts on the next boot - which would otherwise wipe
+# the lab out after any `multipass stop`. See kthw-hosts.sh for why the obvious fixes
+# (cloud.cfg.d override, systemd unit after cloud-init) do not work.
 sudo install -o root -g root -m 644 /tmp/hostentries    /etc/kthw-hostentries
 sudo install -o root -g root -m 755 /tmp/kthw-hosts.sh  /usr/local/sbin/kthw-hosts.sh
-sudo install -o root -g root -m 644 /tmp/kthw-hosts.service /etc/systemd/system/kthw-hosts.service
-sudo systemctl daemon-reload
-sudo systemctl enable kthw-hosts.service > /dev/null 2>&1
 sudo /usr/local/sbin/kthw-hosts.sh
 
 # PRIMARY_IP is the address Kubernetes components bind to and advertise. Each VM has

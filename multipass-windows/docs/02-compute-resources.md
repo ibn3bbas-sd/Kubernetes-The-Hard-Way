@@ -64,7 +64,6 @@ There are no forwarded ports. The VirtualBox route needs them because its VMs si
 
 The script:
 
-- Deploys 5 VMs - 2 control plane, 2 worker and 1 load balancer - sized from your host RAM.
 - Gives each a second NIC on the `kthw-lab` switch with a static address in `192.168.56.0/24`.
 - Writes `/etc/hosts` on every node so all five resolve each other by name.
 - Sets `PRIMARY_IP` (this node's lab address) and `ARCH=amd64` in `/etc/environment`.
@@ -126,14 +125,21 @@ multipass start controlplane01 controlplane02 node01 node02 loadbalancer
 
 The lab addresses are static and survive stop/start, which is the whole reason for the dedicated switch. The `eth0` addresses will change, and that is expected and harmless - nothing in the cluster refers to them.
 
-`/etc/hosts` also survives, but only because the deploy installs a small service to make it so. The Multipass image has cloud-init's `manage_etc_hosts` enabled, which **regenerates `/etc/hosts` from a template on every boot** and would otherwise wipe the lab entries - leaving `dig +short controlplane01` returning `127.0.1.1` and every other lab name resolving to nothing. `kthw-hosts.service` re-applies them after cloud-init has finished. If you ever suspect it:
+`/etc/hosts` also survives, but only because the deploy takes a deliberate step to make it so. The Multipass image enables cloud-init's `manage_etc_hosts`, whose `update_etc_hosts` module **regenerates `/etc/hosts` from a template on every boot** - which would leave `dig +short controlplane01` returning `127.0.1.1` and every other lab name resolving to nothing, breaking the certificate and kubeconfig steps in a way that points nowhere near the cause. `kthw-hosts.sh` comments that module out of `/etc/cloud/cloud.cfg`, after which `/etc/hosts` behaves like an ordinary file.
+
+Verified: stopping and starting all five instances leaves every name resolving to its lab address.
+
+If you ever suspect it:
 
 ```bash
-multipass exec controlplane01 -- systemctl status kthw-hosts.service
-multipass exec controlplane01 -- dig +short node01     # expect 192.168.56.21
+multipass exec controlplane01 -- dig +short node01          # expect 192.168.56.21
+multipass exec controlplane01 -- grep update_etc_hosts /etc/cloud/cloud.cfg   # expect it commented out
 ```
 
-Re-running `SKIP_LAUNCH=1 ./deploy-virtual-machines.sh` reinstalls and re-applies it.
+Re-running `SKIP_LAUNCH=1 ./deploy-virtual-machines.sh` re-applies both.
+
+> Upstream's own advice for this ([canonical/multipass#3614](https://github.com/canonical/multipass/issues/3614)) is to edit `/etc/cloud/templates/hosts.debian.tmpl` instead, leaving cloud-init in charge. That works too; we disable the module because it keeps the lab's hosts file an ordinary file that behaves the way the lab docs assume.
+
 
 > After a host reboot, give Hyper-V a moment before starting the VMs. If a VM fails to start with a network error, confirm the switch survived with `multipass networks` - it should still list `kthw-lab`.
 
@@ -164,7 +170,7 @@ You have not run `create-lab-network.ps1`, or you ran it with a different `-Swit
 
 ### `Multipass daemon appears deadlocked. Resetting it...`
 
-This is expected, and the script handles it. Multipass 1.16.x on the Hyper-V driver intermittently deadlocks: a launch hangs at `Starting <node>` forever even though the VM has booted cleanly and answers SSH, and every subsequent `multipass` command hangs behind it. `Restart-Service Multipass` does not help - the service sits in `StopPending` indefinitely.
+This is expected, and the script handles it. It is a known upstream bug - [canonical/multipass#5080](https://github.com/canonical/multipass/issues/5080), open and untriaged - not anything wrong with your setup. Multipass on the Hyper-V driver intermittently deadlocks: a launch hangs at `Starting <node>` forever even though the VM has booted cleanly and answers SSH, and every subsequent `multipass` command hangs behind it. `Restart-Service Multipass` does not help - the service sits in `StopPending` indefinitely.
 
 `deploy-virtual-machines.sh` detects the stall by timeout, runs [reset-multipass.ps1](../reset-multipass.ps1) to force the daemon back to life, clears the half-built instance and retries, up to three times per node. You may see a UAC prompt when it does this, because restarting the service needs Administrator rights. Approve it and the deploy continues.
 

@@ -66,7 +66,7 @@ cd kubernetes-the-hard-way/multipass-windows
 
 This is the one place where the Windows/Multipass route differs meaningfully from the others, and it is worth understanding before you start.
 
-Multipass attaches every instance to the Hyper-V **Default Switch**. That switch is NAT-based, and **Windows re-randomises its subnet on each host reboot**. This lab writes node IP addresses into certificate Subject Alternative Names and into kubeconfig files, so if the node addresses moved half way through, your cluster would stop working and you would have to redo the PKI chapters.
+Multipass attaches every instance to the Hyper-V **Default Switch**. That switch is NAT-based, and **Windows re-randomises its subnet on each host reboot**. This is long-standing and upstream considers it settled: [canonical/multipass#1153](https://github.com/canonical/multipass/issues/1153) reports the same thing and was closed with "use `<instance>.mshome.net`", and [#3582](https://github.com/canonical/multipass/issues/3582) - asking for a static IP on the default interface - was closed as not planned, because the Windows-specific parts are closed source. A stable hostname does not help this lab: it writes node IP addresses into certificate Subject Alternative Names and into kubeconfig files, so if the addresses moved half way through, your cluster would stop working and you would have to redo the PKI chapters.
 
 So each VM here gets **two** network interfaces:
 

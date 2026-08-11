@@ -65,6 +65,21 @@ the whole PKI chapter.
 Not theoretical — observed live: a VM's `eth0` moved `192.168.147.3` -> `192.168.155.232` during a
 single session, simply from a `netplan apply`.
 
+**Confirmed upstream, and it will not be fixed.** Canonical
+[multipass#1153](https://github.com/canonical/multipass/issues/1153) (2019) reports precisely this -
+*"the IP address of the vEthernet (default switch) changes every time after Windows reboot"* - filed
+by someone with our exact use case, maintaining hosts-file entries for Windows and WSL. It was closed
+with the advice to use `<instance>.mshome.net` instead of addresses.
+[multipass#3582](https://github.com/canonical/multipass/issues/3582) asks directly for a static IP on
+the default interface; a maintainer's answer is that it would have to be implemented across every
+platform and backend and that *"Windows and macOS specific bits are closed FTTB"*. Closed 2026-04-27
+pointing at a community blog workaround. Same request, also closed: #567, #1293, #1545.
+
+So the sanctioned options are (a) `.mshome.net` hostnames, or (b) attach your own network and
+configure it yourself. **`.mshome.net` does not solve this lab**, which is why we do (b): the labs put
+node IPs in certificate SANs and bind etcd and the API servers to addresses, so a stable *name* does
+not help - the address behind it still moves, invalidating the PKI.
+
 So every VM gets **two NICs**:
 
 | NIC | Network | Purpose |
@@ -127,6 +142,19 @@ later `multipass` command then hangs behind it, and **`Restart-Service Multipass
 Recovery (this is `reset-multipass.ps1`): force the VM off (releases the daemon), **kill the
 `multipassd` process** — not stop the service — then start the service.
 
+**This is upstream bug [multipass#5080](https://github.com/canonical/multipass/issues/5080)** -
+*"Daemon blocks indefinitely on spawning new SSHProcess when the underlying VM has shut down"*,
+opened 2026-07-15, still `needs triage` with no fix PR. Their gdb traces give the mechanism:
+`state_mut` is held in `exec_process` in `BaseVM` while an ssh session to a downed VM blocks on
+`poll` **with no timeout**, so the mutex is never released and the main thread deadlocks on
+`on_shutdown`. The reporter's own summary - *"No timeouts bail out the daemon"* - is exactly why
+`mp_guard` has to impose a timeout from outside, and why killing the process is the only exit.
+
+Their trigger, an **aborted instance start**, matches ours: every deadlock here followed a launch
+that had been interrupted or timed out. The failure is self-feeding - one stall creates the
+conditions for the next - which is why the deploy script purges a half-built instance before
+retrying rather than just re-running `launch`.
+
 Contributing factors, both worth avoiding: the **GUI tray app polls the daemon** continuously (it
 also **respawns after being killed**), and **two concurrent deploys** will do it reliably. A
 chunk of the debugging here was chasing an orphaned run of my own competing with a new one.
@@ -136,10 +164,10 @@ chunk of the debugging here was chasing an orphaned run of my own competing with
 > every instance. That looks like the smoking gun but is **normal** — the Ubuntu cloud image ships
 > no `hv_kvp_daemon` at all (`dpkg -l | grep -c linux-cloud-tools` = 0). Multipass does not use it.
 
-### cloud-init wipes `/etc/hosts` on every boot — found by actually stopping the VMs
+### cloud-init wipes `/etc/hosts` on every boot - and the two obvious fixes both fail
 The static addresses survive `multipass stop` / `start` exactly as designed. **`/etc/hosts` does
-not.** The image has cloud-init `manage_etc_hosts` enabled, so every boot regenerates the file from
-`/etc/cloud/templates/hosts.debian.tmpl`, leaving only:
+not.** The image enables cloud-init's `manage_etc_hosts`, so `update_etc_hosts` regenerates the file
+from `/etc/cloud/templates/hosts.debian.tmpl` on every boot, leaving only:
 
 ```
 127.0.1.1 controlplane01 controlplane01
@@ -147,20 +175,43 @@ not.** The image has cloud-init `manage_etc_hosts` enabled, so every boot regene
 ```
 
 `dig +short controlplane01` then returns **`127.0.1.1`** and every other lab name resolves to
-**nothing**. The labs use `dig +short` to build certificate SANs and kubeconfigs
-(`CONTROL01=$(dig +short controlplane01)`), so a cluster built after a pause would fail with
-errors pointing nowhere near `/etc/hosts`. The docs tell you to `multipass stop` to pause the lab,
-so this was on the default path.
+**nothing**. The labs build certificate SANs and kubeconfigs from `dig +short`, so a cluster built
+after a pause fails with errors pointing nowhere near `/etc/hosts` - and the docs tell you to
+`multipass stop` to pause, so this is on the default path.
 
-Setting `manage_etc_hosts: false` in `/etc/cloud/cloud.cfg.d/` does **not** fix it — Multipass sets
-the value in the instance **user-data**, which outranks anything in `cloud.cfg.d`. Rather than
-fight cloud-init's precedence, `kthw-hosts.service` re-applies the entries from
-`/etc/kthw-hostentries` after `cloud-final.service`, and also strips the `127.0.1.1` line that
-would otherwise shadow the host's real address.
+**Fix 1, `manage_etc_hosts: false` in `/etc/cloud/cloud.cfg.d/` - does not work.** Multipass sets
+the value in the instance **vendor-data**, which cloud-init merges at higher precedence than
+anything in `cloud.cfg.d`. The override is silently ignored.
 
-> Worth internalising: `PRIMARY_IP` and `ARCH` in `/etc/environment` **did** survive, and so did
-> netplan. Only the cloud-init-managed file was reset. When something "doesn't persist", check
-> whether cloud-init owns it before assuming the write failed.
+**Fix 2, a systemd unit ordered `After=cloud-final.service` - does not work either, and fails
+silently.** On Ubuntu `cloud-final.service` is itself `After=multi-user.target`, and **a target
+implicitly gains `After=` on the units it `Wants`**, so `WantedBy=multi-user.target` closes an
+ordering cycle. systemd resolves it by deleting the unit's start job. The tell is brutal:
+
+```
+$ systemctl is-enabled kthw-hosts.service   ->  enabled
+$ systemctl is-active  kthw-hosts.service   ->  inactive
+$ journalctl -b | grep -i 'ordering cycle'
+  multi-user.target: Found ordering cycle on kthw-hosts.service/start
+  Job kthw-hosts.service/start deleted to break ordering cycle
+```
+
+Removing `Before=multi-user.target` does **not** help - the target's implicit ordering is what
+closes the loop. I shipped this version, and only caught it because I stopped a VM to check.
+
+**What works:** comment `- update_etc_hosts` out of `cloud_init_modules` in `/etc/cloud/cloud.cfg`.
+The module list is read from `cloud.cfg` itself, so it takes effect whatever vendor-data asks for,
+and `/etc/hosts` becomes an ordinary file again. Verified across a stop/start of all five instances.
+
+Upstream's own prescription ([multipass#3614](https://github.com/canonical/multipass/issues/3614),
+closed) is to edit `/etc/cloud/templates/hosts.debian.tmpl` and leave cloud-init in charge; that is
+equally valid. Both #3614 and [#2385](https://github.com/canonical/multipass/issues/2385) are closed
+as working-as-designed, so this is behaviour to work around, not a bug to wait on.
+
+> Worth internalising: `PRIMARY_IP`, `ARCH` and netplan **all** survived. Only the
+> cloud-init-managed file was reset. When something "doesn't persist", ask whether cloud-init owns
+> it before assuming the write failed. And a systemd unit that is `enabled` is not necessarily a
+> unit that **runs**.
 
 ### Guard *every* multipass call, not just `launch`
 An unguarded `multipass exec` mid-provisioning froze a run for **20 minutes with no output** —
@@ -192,6 +243,22 @@ dig +short controlplane02  ->   192.168.56.12
 stub — the shared `docs/` pages depend on this (`CONTROL01=$(dig +short controlplane01)`), and
 `dig` is already present in the image.
 
+## Upstream issues behind the two hard parts
+
+Checked 2026-08-11. Neither is our misconfiguration; both are Canonical's, and neither has a fix.
+
+| Issue | State | What it establishes |
+|---|---|---|
+| [#5080](https://github.com/canonical/multipass/issues/5080) | **open**, needs triage, no fix PR | The daemon deadlock. Root-caused to `state_mut` held across a timeout-less ssh `poll` in `BaseVM::exec_process`. Trigger is an aborted instance start |
+| [#3582](https://github.com/canonical/multipass/issues/3582) | closed 2026-04-27, won't-fix | Static IP on the default interface is unsupported and unplanned; the Windows-specific parts are closed source |
+| [#1153](https://github.com/canonical/multipass/issues/1153) | closed 2019 | The Default Switch subnet changes on every Windows reboot. Answered with "use `.mshome.net`", not fixed |
+| [#4383](https://github.com/canonical/multipass/issues/4383) | closed | Same class of problem on macOS - an OS upgrade moved the bridge subnet |
+| [#708](https://github.com/canonical/multipass/issues/708) | closed, believed stale | Shutting Windows down with an instance running left it unusable on next boot. Worth knowing if a host crash ever wedges the lab |
+
+Practical consequence: **do not spend time trying to make `multipass` itself behave here.** The
+second NIC and the daemon-reset retry work around defects upstream has either declined to fix or has
+not yet triaged.
+
 ## Files
 
 | Path | Purpose |
@@ -203,8 +270,7 @@ stub — the shared `docs/` pages depend on this (`CONTROL01=$(dig +short contro
 | `../multipass-windows/reset-multipass.ps1` | Deadlock recovery; called automatically by the deploy |
 | `../multipass-windows/scripts/00-setup-network.sh` | In-VM: static `eth1` via netplan, applied detached |
 | `../multipass-windows/scripts/01-setup-hosts.sh` | In-VM: installs the hosts unit, `PRIMARY_IP`, `ARCH=amd64`, sshd password auth, `ubuntu:ubuntu` |
-| `../multipass-windows/scripts/kthw-hosts.sh` | In-VM: re-applies `/etc/hosts` from `/etc/kthw-hostentries`. Run at provision time **and every boot** |
-| `../multipass-windows/scripts/kthw-hosts.service` | In-VM: runs the above after `cloud-final.service` |
+| `../multipass-windows/scripts/kthw-hosts.sh` | In-VM: applies `/etc/hosts` from `/etc/kthw-hostentries` and disables cloud-init's `update_etc_hosts` so it stays applied |
 | `../multipass-windows/scripts/cert_verify.sh` | Upstream's, with `PRIMARY_IP=$(dig +short $(hostname))` |
 | `../multipass-windows/docs/01-prerequisites.md` | Windows prerequisites + the two-NIC explanation |
 | `../multipass-windows/docs/02-compute-resources.md` | Deploy, verify, pause/resume, teardown, troubleshooting |
@@ -219,9 +285,10 @@ stub — the shared `docs/` pages depend on this (`CONTROL01=$(dig +short contro
 ## Open / not done
 
 - The Kubernetes labs (`docs/03`-`17`) have not been run. Only the VM infrastructure is proven.
-- **Stop/start is now tested** (2026-08-11): the static `eth1` addresses came back unchanged on all
-  five nodes, and the `eth0` ones had all moved - the design working as intended. That test is what
-  exposed the cloud-init `/etc/hosts` wipe above.
+- **Stop/start is tested** (2026-08-11): all five instances stopped and started, every node's
+  `eth1` address, `PRIMARY_IP` and full name resolution intact, while the `eth0` addresses had all
+  moved - the design working as intended. That test is what exposed the cloud-init `/etc/hosts`
+  wipe above, and re-running it is what caught the broken first fix.
 - Still **not tested across a full host reboot**, where the Default Switch subnet itself is
   re-randomised. The switch and its `192.168.56.1` host address survived a day of uptime, but a
   real reboot has not been done.
