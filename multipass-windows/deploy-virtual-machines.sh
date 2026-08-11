@@ -148,28 +148,35 @@ if ! timeout -k 10 60 "$MULTIPASS" networks --format csv 2>/dev/null | tr -d '\r
     exit 1
 fi
 
-# Size the VMs against host RAM, not WSL's share of it.
+# Memory per VM. Based on the table in the VirtualBox lab docs so both routes build a
+# comparable cluster, with two deliberate departures: both workers get 1024M (the
+# VirtualBox table's 512M for node01 is thin for containerd + kubelet + kube-proxy +
+# Weave, and an asymmetric pair of workers only makes scheduling behaviour harder to
+# read), and the loadbalancer drops to 512M, which is ample for HAProxy. Same 5.5GB
+# total either way.
+#
+# Override any of them from the environment, e.g.
+#   CP1MEM=4096M NODE1MEM=2048M ./deploy-virtual-machines.sh
+CP1MEM="${CP1MEM:-2048M}"    # controlplane01
+CP2MEM="${CP2MEM:-1024M}"    # controlplane02
+NODE1MEM="${NODE1MEM:-1024M}" # node01
+NODE2MEM="${NODE2MEM:-1024M}" # node02
+LBMEM="${LBMEM:-512M}"       # loadbalancer
+
 MEM_GB=$(powershell.exe -NoProfile -Command \
     '[math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB)' 2>/dev/null | tr -d '\r')
 MEM_GB=${MEM_GB:-0}
-
-if [ "$MEM_GB" -ge 24 ]; then
-    CP1MEM="4G";   CP2MEM="2G";   WNMEM="2G"
-elif [ "$MEM_GB" -ge 15 ]; then
-    CP1MEM="2G";   CP2MEM="2G";   WNMEM="2G"
-else
-    CP1MEM="768M"; CP2MEM="768M"; WNMEM="512M"
-    echo -e "${YELLOW}Host RAM is ${MEM_GB}GB. VM sizes are reduced."
-    echo -e "It will not be possible for you to run E2E tests (final step).${NC}"
+if [ "$MEM_GB" -gt 0 ] && [ "$MEM_GB" -lt 8 ]; then
+    echo -e "${YELLOW}Host RAM is ${MEM_GB}GB. This lab wants 8GB minimum, 16GB recommended.${NC}"
 fi
 
 # name,cpus,memory,disk,last octet of the lab address
 specs=$(cat <<EOF
 controlplane01,2,${CP1MEM},15G,11
 controlplane02,2,${CP2MEM},10G,12
-loadbalancer,1,512M,5G,30
-node01,2,${WNMEM},10G,21
-node02,2,${WNMEM},10G,22
+loadbalancer,1,${LBMEM},5G,30
+node01,2,${NODE1MEM},10G,21
+node02,2,${NODE2MEM},10G,22
 EOF
 )
 
@@ -218,6 +225,7 @@ do
 done
 
 cp "${SCRIPTS_DIR}/00-setup-network.sh" "${SCRIPTS_DIR}/01-setup-hosts.sh" \
+   "${SCRIPTS_DIR}/kthw-hosts.sh" "${SCRIPTS_DIR}/kthw-hosts.service" \
    "${SCRIPTS_DIR}/cert_verify.sh" "$STAGE/"
 cp "${TOOLS_DIR}/approve-csr.sh" "$STAGE/"
 
@@ -283,6 +291,8 @@ do
              "netplan-${node}.yaml:/tmp/99-kthw-lab.yaml" \
              "00-setup-network.sh:/tmp/00-setup-network.sh" \
              "01-setup-hosts.sh:/tmp/01-setup-hosts.sh" \
+             "kthw-hosts.sh:/tmp/kthw-hosts.sh" \
+             "kthw-hosts.service:/tmp/kthw-hosts.service" \
              "cert_verify.sh:/home/ubuntu/cert_verify.sh"
     do
         src="${f%%:*}"; dst="${f#*:}"

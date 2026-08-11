@@ -40,6 +40,26 @@ From **WSL**:
 
 This takes roughly 10 minutes on a first run - the Ubuntu 22.04 image is downloaded once and cached, so rebuilds are faster.
 
+It deploys 5 VMs - 2 control plane, 2 worker and 1 load balancer - on the stable `192.168.56.0/24` lab network:
+
+| VM | Purpose | IP | CPU | RAM | Disk | Override |
+| --- | --- | --- | --- | --- | --- | --- |
+| controlplane01 | Control plane, and your admin client | 192.168.56.11 | 2 | 2048M | 15G | `CP1MEM` |
+| controlplane02 | Control plane | 192.168.56.12 | 2 | 1024M | 10G | `CP2MEM` |
+| node01 | Worker | 192.168.56.21 | 2 | 1024M | 10G | `NODE1MEM` |
+| node02 | Worker | 192.168.56.22 | 2 | 1024M | 10G | `NODE2MEM` |
+| loadbalancer | HAProxy in front of both API servers | 192.168.56.30 | 1 | 512M | 5G | `LBMEM` |
+
+5.5GB of RAM in total. Raise any of them from the environment if you have it to spare:
+
+```bash
+CP1MEM=4096M NODE1MEM=2048M ./deploy-virtual-machines.sh
+```
+
+> These follow the [VirtualBox lab's table](../../VirtualBox/docs/02-compute-resources.md) with two deliberate departures: both workers get 1024M rather than 512M and 1024M, because 512M is thin for a worker running containerd, kubelet, kube-proxy and Weave - and two identical workers make scheduling behaviour easier to reason about. The loadbalancer drops to 512M, which is plenty for HAProxy. The total is unchanged.
+
+There are no forwarded ports. The VirtualBox route needs them because its VMs sit behind NAT; here the lab network is directly reachable from Windows, so you can `ssh ubuntu@192.168.56.11` (password `ubuntu`) or open a NodePort in your browser without any port mapping.
+
 > **Leave Multipass alone while this runs.** Do not open a second terminal and run `multipass list`, and close the Multipass GUI tray application if it is running. `multipassd` serialises operations, and issuing a command while a launch is in progress can deadlock it - the launch then hangs at `Starting <node>` forever even though the VM itself is up and healthy. See the troubleshooting note below if this happens to you.
 
 The script:
@@ -104,7 +124,16 @@ To resume:
 multipass start controlplane01 controlplane02 node01 node02 loadbalancer
 ```
 
-The lab addresses are static and survive stop/start **and a host reboot**, which is the whole reason for the dedicated switch. The `eth0` addresses will change, and that is expected and harmless - nothing in the cluster refers to them.
+The lab addresses are static and survive stop/start, which is the whole reason for the dedicated switch. The `eth0` addresses will change, and that is expected and harmless - nothing in the cluster refers to them.
+
+`/etc/hosts` also survives, but only because the deploy installs a small service to make it so. The Multipass image has cloud-init's `manage_etc_hosts` enabled, which **regenerates `/etc/hosts` from a template on every boot** and would otherwise wipe the lab entries - leaving `dig +short controlplane01` returning `127.0.1.1` and every other lab name resolving to nothing. `kthw-hosts.service` re-applies them after cloud-init has finished. If you ever suspect it:
+
+```bash
+multipass exec controlplane01 -- systemctl status kthw-hosts.service
+multipass exec controlplane01 -- dig +short node01     # expect 192.168.56.21
+```
+
+Re-running `SKIP_LAUNCH=1 ./deploy-virtual-machines.sh` reinstalls and re-applies it.
 
 > After a host reboot, give Hyper-V a moment before starting the VMs. If a VM fails to start with a network error, confirm the switch survived with `multipass networks` - it should still list `kthw-lab`.
 

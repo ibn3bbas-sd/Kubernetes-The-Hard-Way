@@ -24,18 +24,21 @@ clean up `/var/db/dhcpd_leases`, and set `ARCH=arm64`.
 Deliberately identical to the VirtualBox route's addresses, so every sample output in the shared
 `docs/` pages matches what you actually see.
 
-| VM | Role | Lab IP | RAM (32 GB host) |
-|---|---|---|---|
-| `controlplane01` | control plane + admin client | 192.168.56.11 | 4 GB |
-| `controlplane02` | control plane | 192.168.56.12 | 2 GB |
-| `node01` | worker | 192.168.56.21 | 2 GB |
-| `node02` | worker | 192.168.56.22 | 2 GB |
-| `loadbalancer` | HAProxy over both API servers | 192.168.56.30 | 512 MB |
+| VM | Role | Lab IP | RAM | Override |
+|---|---|---|---|---|
+| `controlplane01` | control plane + admin client | 192.168.56.11 | 2048M | `CP1MEM` |
+| `controlplane02` | control plane | 192.168.56.12 | 1024M | `CP2MEM` |
+| `node01` | worker | 192.168.56.21 | 1024M | `NODE1MEM` |
+| `node02` | worker | 192.168.56.22 | 1024M | `NODE2MEM` |
+| `loadbalancer` | HAProxy over both API servers | 192.168.56.30 | 512M | `LBMEM` |
+
+Based on the **VirtualBox lab's table** (5.5 GB total) with two deliberate departures: both workers
+get 1024M rather than 512M/1024M, since 512M is thin for containerd + kubelet + kube-proxy + Weave
+and an asymmetric worker pair makes scheduling behaviour harder to read; and the loadbalancer drops
+to 512M, ample for HAProxy.
 
 Windows itself holds `192.168.56.1`, so NodePorts are reachable from the host browser — a
-convenience the NAT-only Apple Silicon route cannot offer. Sizing auto-scales: >=24 GB host gets the
-above, 15-24 GB shrinks `controlplane01` to 2 GB, <15 GB shrinks everything and warns that the
-final E2E-test lab will not run.
+convenience the NAT-only Apple Silicon route cannot offer.
 
 ## Run it
 
@@ -133,6 +136,32 @@ chunk of the debugging here was chasing an orphaned run of my own competing with
 > every instance. That looks like the smoking gun but is **normal** — the Ubuntu cloud image ships
 > no `hv_kvp_daemon` at all (`dpkg -l | grep -c linux-cloud-tools` = 0). Multipass does not use it.
 
+### cloud-init wipes `/etc/hosts` on every boot — found by actually stopping the VMs
+The static addresses survive `multipass stop` / `start` exactly as designed. **`/etc/hosts` does
+not.** The image has cloud-init `manage_etc_hosts` enabled, so every boot regenerates the file from
+`/etc/cloud/templates/hosts.debian.tmpl`, leaving only:
+
+```
+127.0.1.1 controlplane01 controlplane01
+127.0.0.1 localhost
+```
+
+`dig +short controlplane01` then returns **`127.0.1.1`** and every other lab name resolves to
+**nothing**. The labs use `dig +short` to build certificate SANs and kubeconfigs
+(`CONTROL01=$(dig +short controlplane01)`), so a cluster built after a pause would fail with
+errors pointing nowhere near `/etc/hosts`. The docs tell you to `multipass stop` to pause the lab,
+so this was on the default path.
+
+Setting `manage_etc_hosts: false` in `/etc/cloud/cloud.cfg.d/` does **not** fix it — Multipass sets
+the value in the instance **user-data**, which outranks anything in `cloud.cfg.d`. Rather than
+fight cloud-init's precedence, `kthw-hosts.service` re-applies the entries from
+`/etc/kthw-hostentries` after `cloud-final.service`, and also strips the `127.0.1.1` line that
+would otherwise shadow the host's real address.
+
+> Worth internalising: `PRIMARY_IP` and `ARCH` in `/etc/environment` **did** survive, and so did
+> netplan. Only the cloud-init-managed file was reset. When something "doesn't persist", check
+> whether cloud-init owns it before assuming the write failed.
+
 ### Guard *every* multipass call, not just `launch`
 An unguarded `multipass exec` mid-provisioning froze a run for **20 minutes with no output** —
 no dots, no error, process alive. `mp_guard` in the deploy script wraps every call with a timeout,
@@ -173,7 +202,9 @@ stub — the shared `docs/` pages depend on this (`CONTROL01=$(dig +short contro
 | `../multipass-windows/remove-lab-network.ps1` | Elevated. Removes switch + firewall rule |
 | `../multipass-windows/reset-multipass.ps1` | Deadlock recovery; called automatically by the deploy |
 | `../multipass-windows/scripts/00-setup-network.sh` | In-VM: static `eth1` via netplan, applied detached |
-| `../multipass-windows/scripts/01-setup-hosts.sh` | In-VM: `/etc/hosts`, `PRIMARY_IP`, `ARCH=amd64`, sshd password auth, `ubuntu:ubuntu` |
+| `../multipass-windows/scripts/01-setup-hosts.sh` | In-VM: installs the hosts unit, `PRIMARY_IP`, `ARCH=amd64`, sshd password auth, `ubuntu:ubuntu` |
+| `../multipass-windows/scripts/kthw-hosts.sh` | In-VM: re-applies `/etc/hosts` from `/etc/kthw-hostentries`. Run at provision time **and every boot** |
+| `../multipass-windows/scripts/kthw-hosts.service` | In-VM: runs the above after `cloud-final.service` |
 | `../multipass-windows/scripts/cert_verify.sh` | Upstream's, with `PRIMARY_IP=$(dig +short $(hostname))` |
 | `../multipass-windows/docs/01-prerequisites.md` | Windows prerequisites + the two-NIC explanation |
 | `../multipass-windows/docs/02-compute-resources.md` | Deploy, verify, pause/resume, teardown, troubleshooting |
@@ -181,15 +212,19 @@ stub — the shared `docs/` pages depend on this (`CONTROL01=$(dig +short contro
 ## Tunables
 
 `SWITCH`, `LAB_NET`, `UBUNTU_RELEASE`, `LAUNCH_TIMEOUT`, `LAUNCH_ATTEMPTS`, `SKIP_LAUNCH`,
-`MULTIPASS` — all environment variables. Changing `LAB_NET` needs a matching `-HostIp` on
+`MULTIPASS`, and the per-VM memory overrides `CP1MEM` / `CP2MEM` / `NODE1MEM` / `NODE2MEM` / `LBMEM` — all environment variables. Changing `LAB_NET` needs a matching `-HostIp` on
 `create-lab-network.ps1`; nothing else needs editing, because the labs compute everything from
 `/etc/hosts` and `PRIMARY_IP`.
 
 ## Open / not done
 
 - The Kubernetes labs (`docs/03`-`17`) have not been run. Only the VM infrastructure is proven.
-- Not tested across a **host reboot**. The design intent is that static `eth1` addresses survive
-  where Default Switch ones would not, but that has not been demonstrated.
+- **Stop/start is now tested** (2026-08-11): the static `eth1` addresses came back unchanged on all
+  five nodes, and the `eth0` ones had all moved - the design working as intended. That test is what
+  exposed the cloud-init `/etc/hosts` wipe above.
+- Still **not tested across a full host reboot**, where the Default Switch subnet itself is
+  re-randomised. The switch and its `192.168.56.1` host address survived a day of uptime, but a
+  real reboot has not been done.
 - Not offered upstream as a PR.
 
 See also [../multipass-windows/docs/01-prerequisites.md](../multipass-windows/docs/01-prerequisites.md)

@@ -3,20 +3,20 @@
 # Runs inside each VM, after 00-setup-network.sh has brought up the lab NIC.
 set -e
 
-# Drop the entries Multipass generated for this host, then install the lab's own.
-# /tmp/hostentries maps every node name to its address on the stable lab network,
-# so from here on `dig +short controlplane01` and friends resolve to lab addresses
-# rather than to the Default Switch addresses, which change on host reboot.
+# Install the lab's hosts entries. /tmp/hostentries maps every node name to its
+# address on the stable lab network, so from here on `dig +short controlplane01` and
+# friends resolve to lab addresses rather than to the Default Switch addresses, which
+# change on host reboot.
 #
-# Every lab name is stripped first, not just this host's, so that re-running the
-# provisioning (see SKIP_LAUNCH in deploy-virtual-machines.sh) replaces the entries
-# instead of appending a second copy of each.
-while read -r _ip name
-do
-    [ -n "$name" ] && sudo sed -i "/[[:space:]]${name}\$/d" /etc/hosts
-done < /tmp/hostentries
-sudo sed -i "/$(hostname)/d" /etc/hosts
-cat /tmp/hostentries | sudo tee -a /etc/hosts &> /dev/null
+# The entries are applied by kthw-hosts.sh rather than inline, because that same
+# script has to run again on every boot - cloud-init regenerates /etc/hosts each time
+# the instance starts and would otherwise wipe the lab out. See kthw-hosts.sh.
+sudo install -o root -g root -m 644 /tmp/hostentries    /etc/kthw-hostentries
+sudo install -o root -g root -m 755 /tmp/kthw-hosts.sh  /usr/local/sbin/kthw-hosts.sh
+sudo install -o root -g root -m 644 /tmp/kthw-hosts.service /etc/systemd/system/kthw-hosts.service
+sudo systemctl daemon-reload
+sudo systemctl enable kthw-hosts.service > /dev/null 2>&1
+sudo /usr/local/sbin/kthw-hosts.sh
 
 # PRIMARY_IP is the address Kubernetes components bind to and advertise. Each VM has
 # two NICs and the default route points at the Multipass-managed one, so we take the

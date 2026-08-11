@@ -6,7 +6,7 @@ Begin here if your machine is Windows and you want to use **Multipass** rather t
 
 This lab provisions 5 VMs on your workstation. That's a lot of compute resource!
 
-- 16GB RAM (32GB recommended). The deploy script sizes the VMs from your host RAM: at 24GB or more you get full-size nodes, between 15GB and 24GB slightly smaller ones, and below 15GB the VMs are shrunk to the point where the final E2E test step will not run.
+- 16GB RAM. The five VMs total 5.5GB - see [Lab Defaults](#lab-defaults) below, including how to raise any of them.
 - 8 core or better CPU. May work with fewer, but will be slow.
 - 50 GB free disk space.
 
@@ -87,13 +87,21 @@ These match the VirtualBox labs, so every sample output in [docs](../../docs/) l
 
 `192.168.56.0/24`, with the Windows host itself on `192.168.56.1`.
 
-| VM | Purpose | IP |
-| --- | --- | --- |
-| controlplane01 | Control plane, and your admin client | 192.168.56.11 |
-| controlplane02 | Control plane | 192.168.56.12 |
-| node01 | Worker | 192.168.56.21 |
-| node02 | Worker | 192.168.56.22 |
-| loadbalancer | HAProxy in front of both API servers | 192.168.56.30 |
+| VM | Purpose | IP | RAM | Override |
+| --- | --- | --- | --- | --- |
+| controlplane01 | Control plane, and your admin client | 192.168.56.11 | 2048M | `CP1MEM` |
+| controlplane02 | Control plane | 192.168.56.12 | 1024M | `CP2MEM` |
+| node01 | Worker | 192.168.56.21 | 1024M | `NODE1MEM` |
+| node02 | Worker | 192.168.56.22 | 1024M | `NODE2MEM` |
+| loadbalancer | HAProxy in front of both API servers | 192.168.56.30 | 512M | `LBMEM` |
+
+Each VM gets 2 vCPU (1 for the loadbalancer). Raise any of the memory values from the environment if you have the RAM to spare:
+
+```bash
+CP1MEM=4096M NODE1MEM=2048M ./deploy-virtual-machines.sh
+```
+
+> These follow the [VirtualBox lab's table](../../VirtualBox/docs/02-compute-resources.md), except that both workers get 1024M (rather than 512M and 1024M) and the loadbalancer drops to 512M, which is ample for HAProxy. Total is unchanged at 5.5GB. If you reach the E2E tests in lab 17, raise `CP1MEM`.
 
 To change the subnet, set `LAB_NET` when running the deploy script and pass a matching `-HostIp` to `create-lab-network.ps1`:
 
