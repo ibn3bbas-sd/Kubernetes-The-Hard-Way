@@ -1,8 +1,13 @@
+---
+name: pasting-lab-commands-from-windows
+description: Diagnose and fix CRLF line endings breaking Kubernetes The Hard Way lab commands pasted from a Windows host. Use when a pasted command misbehaves in a lab VM - openssl req falling back to interactive prompts, a .key file with no matching .crt, "command not found" on a flag such as -subj or -CA, a CSR printed to the screen instead of written to a file, or systemd units and kubeconfigs written by a heredoc that look correct in cat but fail to parse. Also use proactively before starting lab 04 or 05 when the labs are being driven from Windows. Covers the five-second confirmation test, the fix, how to recover the affected certificates, and which labs are affected.
+---
+
 # Pasting lab commands from Windows: CRLF silently truncates them
 
 **Living doc.** Status: **ACTIVE - affects every lab from 04 onwards.** Hit on 2026-08-11 during
-[04-certificate-authority](../docs/04-certificate-authority.md) while working through the
-[multipass-windows](multipass-windows-runbook.md) route.
+[04-certificate-authority](../../../docs/04-certificate-authority.md) while working through the
+[multipass-windows](../multipass-windows-runbook/SKILL.md) route.
 
 If you copy commands from a browser on Windows and paste them into a VM shell, each line arrives
 terminated `\r\n` instead of `\n`. Bash does not treat `\r` as whitespace, and that breaks the lab
@@ -162,4 +167,4 @@ done
 
 The lab was written and tested on macOS and Linux, where the clipboard carries LF. It is specific
 to driving the VMs from a Windows host - the same reason the
-[multipass-windows](multipass-windows-runbook.md) route exists at all.
+[multipass-windows](../multipass-windows-runbook/SKILL.md) route exists at all.

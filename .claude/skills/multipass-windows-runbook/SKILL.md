@@ -1,8 +1,24 @@
+---
+name: multipass-windows-runbook
+description: Design rationale and build history for the multipass-windows/ route - Multipass + Hyper-V on Windows 11 Pro, driven from WSL. SUPERSEDED for day-to-day access by hyperv-mobaxterm-runbook; read this one for WHY the lab network is built as it is, or when touching anything under multipass-windows/. Explains why the lab needs a dedicated Hyper-V switch and two NICs (the Default Switch subnet is re-randomised on every host reboot, and the labs write node IPs into certificate SANs), why cloud-init wipes /etc/hosts on every boot and which two obvious fixes fail silently, and the Multipass defects that led to dropping it: the daemon deadlock needing a multipassd kill, stdin not crossing the WSL boundary and silently writing empty files, multipass transfer needing Windows paths readable by SYSTEM, netplan apply killing the multipass exec channel, timeout needing -k against a Windows process, and New-VMSwitch 0x800700B7 on an unused name.
+---
+
 # Kubernetes The Hard Way on Multipass (Windows / Hyper-V)
 
-**Living doc.** Status: **DONE 2026-08-10** — the 5-VM lab deploys, provisions and self-verifies
-end to end on the Windows workstation. The Kubernetes labs themselves (docs 03-17) have **not**
-been walked through yet; only the infrastructure is proven.
+**Living doc.** Status: **SUPERSEDED 2026-08-12 for day-to-day use** — the Multipass service is now
+stopped and disabled, and the VMs are driven directly through Hyper-V and accessed over SSH from
+MobaXterm. **To start, stop, connect to or troubleshoot the lab, use
+[hyperv-mobaxterm-runbook](../hyperv-mobaxterm-runbook/SKILL.md).** The `multipass` commands below
+will not run.
+
+This document is still the record of **why the network is built the way it is** — the two-NIC
+design, the dedicated `kthw-lab` switch, and the cloud-init `/etc/hosts` fix are all inherited
+unchanged by the Hyper-V route, and the reasoning is here, not there. The daemon deadlock documented
+below is why Multipass was dropped.
+
+Status of the work it describes: **DONE 2026-08-10** — the 5-VM lab deploys, provisions and
+self-verifies end to end on the Windows workstation. The Kubernetes labs themselves (docs 03-17)
+have **not** been walked through yet; only the infrastructure is proven.
 
 Adds a **third hypervisor route** to the KodeKloud
 [kubernetes-the-hard-way](https://github.com/mmumshad/kubernetes-the-hard-way) lab, which upstream
@@ -49,11 +65,15 @@ convenience the NAT-only Apple Silicon route cannot offer.
 ```bash
 # from WSL, from multipass-windows/
 ./deploy-virtual-machines.sh          # ~12 min cold, ~8 min with the image cached
-multipass shell controlplane01        # then follow ../docs/03-client-tools.md
+multipass shell controlplane01        # then follow docs/03-client-tools.md
 ```
 
 Teardown: `./delete-virtual-machines.sh`, then optionally `.\remove-lab-network.ps1` (elevated).
 The switch is deliberately left behind so a rebuild needs no second elevation.
+
+**Before lab 04, read [pasting-lab-commands-from-windows](../pasting-lab-commands-from-windows/SKILL.md).**
+Commands copied from a browser on Windows arrive CRLF-terminated, which silently truncates the
+`\`-continued commands the labs are full of - and the failure looks like success.
 
 ## Why a dedicated Hyper-V switch (the central design decision)
 
@@ -261,19 +281,21 @@ not yet triaged.
 
 ## Files
 
+Paths are repo-relative, so they paste straight into a shell from the repo root.
+
 | Path | Purpose |
 |---|---|
-| `../multipass-windows/create-lab-network.ps1` | Elevated, once. Internal switch + host IP + firewall rule. Idempotent |
-| `../multipass-windows/deploy-virtual-machines.sh` | Main driver (WSL). Launch, provision, verify |
-| `../multipass-windows/delete-virtual-machines.sh` | Teardown. No stale DHCP leases to clean (unlike macOS) |
-| `../multipass-windows/remove-lab-network.ps1` | Elevated. Removes switch + firewall rule |
-| `../multipass-windows/reset-multipass.ps1` | Deadlock recovery; called automatically by the deploy |
-| `../multipass-windows/scripts/00-setup-network.sh` | In-VM: static `eth1` via netplan, applied detached |
-| `../multipass-windows/scripts/01-setup-hosts.sh` | In-VM: installs the hosts unit, `PRIMARY_IP`, `ARCH=amd64`, sshd password auth, `ubuntu:ubuntu` |
-| `../multipass-windows/scripts/kthw-hosts.sh` | In-VM: applies `/etc/hosts` from `/etc/kthw-hostentries` and disables cloud-init's `update_etc_hosts` so it stays applied |
-| `../multipass-windows/scripts/cert_verify.sh` | Upstream's, with `PRIMARY_IP=$(dig +short $(hostname))` |
-| `../multipass-windows/docs/01-prerequisites.md` | Windows prerequisites + the two-NIC explanation |
-| `../multipass-windows/docs/02-compute-resources.md` | Deploy, verify, pause/resume, teardown, troubleshooting |
+| `multipass-windows/create-lab-network.ps1` | Elevated, once. Internal switch + host IP + firewall rule. Idempotent |
+| `multipass-windows/deploy-virtual-machines.sh` | Main driver (WSL). Launch, provision, verify |
+| `multipass-windows/delete-virtual-machines.sh` | Teardown. No stale DHCP leases to clean (unlike macOS) |
+| `multipass-windows/remove-lab-network.ps1` | Elevated. Removes switch + firewall rule |
+| `multipass-windows/reset-multipass.ps1` | Deadlock recovery; called automatically by the deploy |
+| `multipass-windows/scripts/00-setup-network.sh` | In-VM: static `eth1` via netplan, applied detached |
+| `multipass-windows/scripts/01-setup-hosts.sh` | In-VM: installs the hosts unit, `PRIMARY_IP`, `ARCH=amd64`, sshd password auth, `ubuntu:ubuntu` |
+| `multipass-windows/scripts/kthw-hosts.sh` | In-VM: applies `/etc/hosts` from `/etc/kthw-hostentries` and disables cloud-init's `update_etc_hosts` so it stays applied |
+| `multipass-windows/scripts/cert_verify.sh` | Upstream's, with `PRIMARY_IP=$(dig +short $(hostname))` |
+| `multipass-windows/docs/01-prerequisites.md` | Windows prerequisites + the two-NIC explanation |
+| `multipass-windows/docs/02-compute-resources.md` | Deploy, verify, pause/resume, teardown, troubleshooting |
 
 ## Tunables
 
@@ -294,7 +316,7 @@ not yet triaged.
   real reboot has not been done.
 - Not offered upstream as a PR.
 
-See also [../multipass-windows/docs/01-prerequisites.md](../multipass-windows/docs/01-prerequisites.md)
+See also [multipass-windows/docs/01-prerequisites.md](../../../multipass-windows/docs/01-prerequisites.md)
 for the user-facing version of the network explanation, and
-[../multipass-windows/docs/02-compute-resources.md](../multipass-windows/docs/02-compute-resources.md)
+[multipass-windows/docs/02-compute-resources.md](../../../multipass-windows/docs/02-compute-resources.md)
 for the run/teardown/troubleshooting steps.
